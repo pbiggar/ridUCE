@@ -1,0 +1,4 @@
+.stack-work/
+client_session_key.aes
+server.py
+spamdav-exe

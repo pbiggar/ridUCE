@@ -27,6 +27,8 @@ executable spamdav-exe
                      , spamdav
                      , warp
                      , wai
+                     , wai-extra
+                     , ansi-terminal
                      , http-types
                      , bytestring
                      , HaXml

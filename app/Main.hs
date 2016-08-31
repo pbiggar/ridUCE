@@ -22,6 +22,7 @@ import           Data.Char (toUpper)
 import           Control.Exception (try)
 import qualified Data.Set as Set
 import qualified System.Environment
+import qualified Data.Text
 
 data ReqRes = ReqRes Wai.Request C8BS.ByteString (HTTPc.Response C8LBS.ByteString)
 
@@ -39,7 +40,7 @@ instance Show ReqRes where
     , ""
     , "Response:"
     , "  Status: " ++ show (HTTPc.responseStatus res)
-    , "  Headers: " ++ show (HTTPc.responseHeaders res)
+    , "  Headers: " ++ concatMap header2string (HTTPc.responseHeaders res)
     , "  Body:"
     , C8LBS.unpack (HTTPc.responseBody res)
     ]
@@ -56,7 +57,7 @@ app :: Wai.Application
 app req respond = bracket_
     allocating
     cleaning
-    (gmailResponding respond req)
+    (responding respond req)
 
 allocating = return ()
 cleaning = return ()
@@ -86,10 +87,12 @@ forwardedRequestHeaders (l,_) = Set.member l allowedRequestHeaders
 forwardedResponseHeaders :: (Network.HTTP.Types.Header.HeaderName,a) -> Bool
 forwardedResponseHeaders (l,_) = not $ Set.member l disallowedResponseHeaders
 
+strip = Data.Text.unpack . Data.Text.strip . Data.Text.pack
+
 gmailResponding responder req = do
 
   token <- readFile "gmail-access-token"
-  let header = ("Authorization", C8BS.pack $ "Bearer " ++ token)
+  let header = ("Authorization", C8BS.pack $ "Bearer " ++ (strip token))
 
   let method = Wai.requestMethod req
   let path = Wai.rawPathInfo req
@@ -164,7 +167,7 @@ c200 r = (Status.status200, [], r)
 h200 hs = (Status.status200, hs, "")
 
 respond :: String -> String -> BS -> IO (Status.Status, [(Network.HTTP.Types.Header.HeaderName, ByteString)], String)
-respond "PROPFIND" "/" body
+respond "PROPFIND" "/.well-known/carddav" body
  | isInfixOf "current-user-principal" body =
    return $ c200 response0
  | otherwise =
@@ -181,20 +184,30 @@ respond _ _ _ = return s404
 
 
 xmlResponse str = unlines [
-   "<d:multistatus xmlns:d=\"DAV:\"><d:response>"
+   "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+ , "<d:multistatus xmlns:d=\"DAV:\">"
+ , "  <d:response>"
  , str
- , "</d:response></d:multistatus>"
+ , "  </d:response>"
+ , "</d:multistatus>"
  ]
 
 response0 = xmlResponse $ unlines [
-   "<d:href>/</d:href>"
+   "<d:href>/carddav/v1/principals/spamdavtest@gmail.com/lists/default/</d:href>"
  , "<d:propstat>"
- , "    <d:prop>"
- , "        <d:current-user-principal>"
- , "            <d:href>/principals/users/cdaboo/</d:href>"
- , "        </d:current-user-principal>"
- , "    </d:prop>"
- , "    <d:status>HTTP/1.1 200 OK</d:status>"
+ , "  <d:status>HTTP/1.1 200 OK</d:status>"
+ , "  <d:prop>"
+ , "   <d:principal-URL>"
+ , "    <d:href>/carddav/v1/principals/spamdavtest@gmail.com/</d:href>"
+ , "   </d:principal-URL>"
+ , "   <d:current-user-principal>"
+ , "    <d:href>/carddav/v1/principals/spamdavtest@gmail.com</d:href>"
+ , "   </d:current-user-principal>"
+ , "   <d:resourcetype>"
+ , "    <d:collection/>"
+ , "    <card:addressbook/>"
+ , "   </d:resourcetype>"
+ , "  </d:prop>"
  , "</d:propstat>"
  ]
 

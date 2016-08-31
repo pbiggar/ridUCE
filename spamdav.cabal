@@ -25,6 +25,7 @@ executable spamdav-exe
   ghc-options:         -threaded -rtsopts -with-rtsopts=-N
   build-depends:       base
                      , spamdav
+                     , text
                      , warp
                      , wai
                      , wai-extra

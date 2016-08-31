@@ -31,7 +31,12 @@ executable spamdav-exe
                      , ansi-terminal
                      , http-types
                      , bytestring
-                     , HaXml
+                     , http-client
+                     , http-client-tls
+                     , containers
+                     , http-conduit
+
+
 
   default-language:    Haskell2010
 

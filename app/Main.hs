@@ -13,10 +13,39 @@ import qualified Data.ByteString.Char8 as C8BS
 import qualified Data.ByteString as DBS
 import           Data.ByteString (ByteString, isInfixOf)
 import qualified Data.Maybe as Maybe
-import qualified Text.XML.HaXml.ParseLazy as XMLParse
-import qualified Text.XML.HaXml.Types as XML
 import qualified Network.HTTP.Types.Header (HeaderName)
 import qualified System.Console.ANSI as ANSI
+import qualified Network.HTTP.Simple as HTTPs
+import qualified Network.HTTP.Client as HTTPc
+import qualified Network.HTTP.Client.TLS as HTTPtls
+import           Data.Char (toUpper)
+import           Control.Exception (try)
+import qualified Data.Set as Set
+import qualified System.Environment
+
+data ReqRes = ReqRes Wai.Request C8BS.ByteString (HTTPc.Response C8LBS.ByteString)
+
+instance Show ReqRes where
+  show (ReqRes req body res) =
+    unlines [
+      "Request:"
+    , "  Verb: " ++ x (Wai.requestMethod req)
+    , "  Path:" ++ x (Wai.rawPathInfo req)
+    , "  Headers:"
+    , concatMap header2string (Wai.requestHeaders req)
+    , "  Body:"
+    , x body
+    , ""
+    , ""
+    , "Response:"
+    , "  Status: " ++ show (HTTPc.responseStatus res)
+    , "  Headers: " ++ show (HTTPc.responseHeaders res)
+    , "  Body:"
+    , C8LBS.unpack (HTTPc.responseBody res)
+    ]
+    where x = C8BS.unpack
+          header2string h = (show h) ++ ", \n"
+
 
 main :: IO ()
 main = do
@@ -27,10 +56,72 @@ app :: Wai.Application
 app req respond = bracket_
     allocating
     cleaning
-    (responding respond req)
+    (gmailResponding respond req)
 
 allocating = return ()
 cleaning = return ()
+
+allowedRequestHeaders :: Set.Set Network.HTTP.Types.Header.HeaderName
+allowedRequestHeaders = Set.fromList [
+  "Connection",
+  "Content-length",
+  "Content-type",
+  "Depth",
+  "Brief",
+  "Accept",
+  "Prefer",
+  "User-agent",
+  "Accept-language",
+  "Accept-encoding"
+  ]
+
+disallowedResponseHeaders :: Set.Set Network.HTTP.Types.Header.HeaderName
+disallowedResponseHeaders = Set.fromList [
+  "Content-Encoding"
+  ]
+
+forwardedRequestHeaders :: (Network.HTTP.Types.Header.HeaderName,a) -> Bool
+forwardedRequestHeaders (l,_) = Set.member l allowedRequestHeaders
+
+forwardedResponseHeaders :: (Network.HTTP.Types.Header.HeaderName,a) -> Bool
+forwardedResponseHeaders (l,_) = not $ Set.member l disallowedResponseHeaders
+
+gmailResponding responder req = do
+
+  token <- readFile "gmail-access-token"
+  let header = ("Authorization", C8BS.pack $ "Bearer " ++ token)
+
+  let method = Wai.requestMethod req
+  let path = Wai.rawPathInfo req
+  let headers = filter forwardedRequestHeaders $ Wai.requestHeaders req
+  body <- (Wai.requestBody req)
+
+  let gmailRequest =
+          HTTPs.setRequestMethod method
+        $ HTTPs.setRequestPath path
+        $ HTTPs.setRequestIgnoreStatus
+        $ HTTPs.setRequestSecure True
+        $ HTTPs.setRequestHost "www.googleapis.com"
+        $ HTTPs.setRequestPort 443
+        $ HTTPs.setRequestQueryString []
+        $ HTTPs.setRequestHeaders (header:headers)
+        $ HTTPs.setRequestBodyLBS (C8LBS.fromStrict body)
+        $ HTTPs.defaultRequest
+
+  manager <- HTTPc.newManager HTTPtls.tlsManagerSettings
+  gmailResponse <- HTTPc.httpLbs gmailRequest manager
+
+  let responseCode = HTTPc.responseStatus gmailResponse
+  let responseHeaders = filter forwardedResponseHeaders $ HTTPc.responseHeaders gmailResponse
+  let responseBody = HTTPc.responseBody gmailResponse
+
+  let response = Wai.responseLBS responseCode responseHeaders responseBody
+
+  print $ ReqRes req body gmailResponse
+  responder response
+
+
+
 
 responding :: (Wai.Response -> IO a) -> Wai.Request -> IO a
 responding responder req = do
@@ -60,15 +151,16 @@ responding responder req = do
   putStrLn $ show content
   ANSI.setSGR [ANSI.Reset]
 
-
   responder response
+
+
 
 
 type BS = DBS.ByteString
 type LBS = C8LBS.ByteString
 
 s404 = (Status.status404, [], "")
-c200 r = (Status.status200, [], response0)
+c200 r = (Status.status200, [], r)
 h200 hs = (Status.status200, hs, "")
 
 respond :: String -> String -> BS -> IO (Status.Status, [(Network.HTTP.Types.Header.HeaderName, ByteString)], String)
@@ -79,7 +171,7 @@ respond "PROPFIND" "/" body
    return s404
 respond "OPTIONS" "/principals/users/cdaboo/" _ =
    return $ h200 response1Headers
-respond "PROPFIND" "/principals/users/cdaboo" body
+respond "PROPFIND" "/principals/users/cdaboo/" body
  | isInfixOf "addressbook-home-set" body =
    return $ c200 response2
  | otherwise =
@@ -88,21 +180,22 @@ respond "PROPFIND" "/principals/users/cdaboo" body
 respond _ _ _ = return s404
 
 
+xmlResponse str = unlines [
+   "<d:multistatus xmlns:d=\"DAV:\"><d:response>"
+ , str
+ , "</d:response></d:multistatus>"
+ ]
 
-response0 = unlines [
-   "<d:multistatus xmlns:d=\"DAV:\">"
- , "  <d:response>"
- , "      <d:href>/</d:href>"
- , "      <d:propstat>"
- , "          <d:prop>"
- , "              <d:current-user-principal>"
- , "                  <d:href>/principals/users/cdaboo/</d:href>"
- , "              </d:current-user-principal>"
- , "          </d:prop>"
- , "          <d:status>HTTP/1.1 200 OK</d:status>"
- , "      </d:propstat>"
- , "  </d:response>"
- , "</d:multistatus>"
+response0 = xmlResponse $ unlines [
+   "<d:href>/</d:href>"
+ , "<d:propstat>"
+ , "    <d:prop>"
+ , "        <d:current-user-principal>"
+ , "            <d:href>/principals/users/cdaboo/</d:href>"
+ , "        </d:current-user-principal>"
+ , "    </d:prop>"
+ , "    <d:status>HTTP/1.1 200 OK</d:status>"
+ , "</d:propstat>"
  ]
 
 response1Headers :: [(Network.HTTP.Types.Header.HeaderName, ByteString)]
@@ -113,10 +206,11 @@ response1Headers = [
  , ("DAV", "extended-mkcol")
  ]
 
-
-response2 = unlines [
+response2 = xmlResponse $ unlines [
    "<C:addressbook-home-set xmlns:D=\"DAV:\""
  , "        xmlns:C=\"urn:ietf:params:xml:ns:carddav\">"
- , "       <D:href>/bernard/addresses/</D:href>"
- , "     </C:addressbook-home-set>"
+ , "  <D:href>/bernard/addresses/</D:href>"
+ , "</C:addressbook-home-set>"
  ]
+
+--Verb, URL, HEADERS, BODY ->

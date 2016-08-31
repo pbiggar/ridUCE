@@ -3,11 +3,11 @@
 {-# LANGUAGE TemplateHaskell       #-}
 {-# LANGUAGE TypeFamilies          #-}
 
-
 import qualified Network.Wai.Handler.Warp as Warp
 import qualified Network.Wai as Wai
 import qualified Network.HTTP.Types.Status as Status
 import           Network.HTTP.Types.Status (status200)
+import           Control.Exception.Base (bracket_)
 import qualified Data.ByteString.Lazy.Char8 as C8LBS
 import qualified Data.ByteString.Char8 as C8BS
 import qualified Data.ByteString as DBS
@@ -15,13 +15,107 @@ import           Data.ByteString (ByteString, isInfixOf)
 import qualified Data.Maybe as Maybe
 import qualified Network.HTTP.Types.Header (HeaderName)
 import qualified System.Console.ANSI as ANSI
+import qualified Network.HTTP.Simple as HTTPs
+import qualified Network.HTTP.Client as HTTPc
+import qualified Network.HTTP.Client.TLS as HTTPtls
 import           Data.Char (toUpper)
+import           Control.Exception (try)
+import qualified Data.Set as Set
+import qualified System.Environment
+import qualified Data.Text
+
+data ReqRes = ReqRes Wai.Request C8BS.ByteString (HTTPc.Response C8LBS.ByteString)
+
+instance Show ReqRes where
+  show (ReqRes req body res) =
+    unlines [
+      "Request:"
+    , "  Verb: " ++ x (Wai.requestMethod req)
+    , "  Path:" ++ x (Wai.rawPathInfo req)
+    , "  Headers:"
+    , concatMap header2string (Wai.requestHeaders req)
+    , "  Body:"
+    , x body
+    , ""
+    , ""
+    , "Response:"
+    , "  Status: " ++ show (HTTPc.responseStatus res)
+    , "  Headers: " ++ concatMap header2string (HTTPc.responseHeaders res)
+    , "  Body:"
+    , C8LBS.unpack (HTTPc.responseBody res)
+    ]
+    where x = C8BS.unpack
+          header2string h = (show h) ++ ", \n"
+
 
 main :: IO ()
 main = Warp.run 8080 app
 
 app :: Wai.Application
 app req respond = (responding respond req)
+
+allowedRequestHeaders :: Set.Set Network.HTTP.Types.Header.HeaderName
+allowedRequestHeaders = Set.fromList [
+  "Connection",
+  "Content-length",
+  "Content-type",
+  "Depth",
+  "Brief",
+  "Accept",
+  "Prefer",
+  "User-agent",
+  "Accept-language",
+  "Accept-encoding"
+  ]
+
+disallowedResponseHeaders :: Set.Set Network.HTTP.Types.Header.HeaderName
+disallowedResponseHeaders = Set.fromList [
+  "Content-Encoding"
+  ]
+
+forwardedRequestHeaders :: (Network.HTTP.Types.Header.HeaderName,a) -> Bool
+forwardedRequestHeaders (l,_) = Set.member l allowedRequestHeaders
+
+forwardedResponseHeaders :: (Network.HTTP.Types.Header.HeaderName,a) -> Bool
+forwardedResponseHeaders (l,_) = not $ Set.member l disallowedResponseHeaders
+
+strip = Data.Text.unpack . Data.Text.strip . Data.Text.pack
+
+gmailResponding responder req = do
+
+  token <- readFile "gmail-access-token"
+  let header = ("Authorization", C8BS.pack $ "Bearer " ++ (strip token))
+
+  let method = Wai.requestMethod req
+  let path = Wai.rawPathInfo req
+  let headers = filter forwardedRequestHeaders $ Wai.requestHeaders req
+  body <- (Wai.requestBody req)
+
+  let gmailRequest =
+          HTTPs.setRequestMethod method
+        $ HTTPs.setRequestPath path
+        $ HTTPs.setRequestIgnoreStatus
+        $ HTTPs.setRequestSecure True
+        $ HTTPs.setRequestHost "www.googleapis.com"
+        $ HTTPs.setRequestPort 443
+        $ HTTPs.setRequestQueryString []
+        $ HTTPs.setRequestHeaders (header:headers)
+        $ HTTPs.setRequestBodyLBS (C8LBS.fromStrict body)
+        $ HTTPs.defaultRequest
+
+  manager <- HTTPc.newManager HTTPtls.tlsManagerSettings
+  gmailResponse <- HTTPc.httpLbs gmailRequest manager
+
+  let responseCode = HTTPc.responseStatus gmailResponse
+  let responseHeaders = filter forwardedResponseHeaders $ HTTPc.responseHeaders gmailResponse
+  let responseBody = HTTPc.responseBody gmailResponse
+
+  let response = Wai.responseLBS responseCode responseHeaders responseBody
+
+  print $ ReqRes req body gmailResponse
+  responder response
+
+
 
 
 responding :: (Wai.Response -> IO a) -> Wai.Request -> IO a
